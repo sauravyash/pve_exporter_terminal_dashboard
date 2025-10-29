@@ -1,0 +1,17 @@
+[Unit]
+Description=Live Proxmox console dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=TTY_DEV=/dev/tty1
+ExecStart=/usr/local/sbin/tty_status.sh
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
