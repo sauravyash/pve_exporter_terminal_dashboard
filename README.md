@@ -1,9 +1,3 @@
-Perfect — let’s make you a **comprehensive `README.md`** that documents everything about your Prometheus TTY dashboard and focuses heavily on your new `config.yml` (formerly `pve_dashboard.yaml`).
-
-Below is a full Markdown file you can drop in alongside your codebase (`README.md`), designed to read like a proper GitHub-level doc for others (or future you).
-
----
-
 # Prometheus TTY Dashboard
 
 A lightweight **terminal dashboard** for **Proxmox / Prometheus** environments.
