@@ -1,0 +1,163 @@
+version: 1
+
+datasources:
+  prometheus:
+    base_url: "http://192.168.1.24:9090"
+    timeout_s: 3.0
+
+globals:
+  refresh:
+    fast_s: 0.2
+    bulk_s: 5.0
+  vars:
+    node_id: "node/r440"
+  defaults:
+    missing_value: "---"
+    formats:
+      percent: "%.1f%%"
+      number: "%.1f"
+      kb: "%.1f KB"
+      mb: "%.1f MB"
+      temp_c: "%.0f°C"
+
+metrics:
+  # HOST
+  - id: host_cpu
+    query: 'pve_cpu_usage_ratio{id="${node_id}"}'
+    query_type: instant
+  - id: host_mem_used
+    query: 'pve_memory_usage_bytes{id="${node_id}"}'
+    query_type: instant
+  - id: host_mem_total
+    query: 'pve_memory_size_bytes{id="${node_id}"}'
+    query_type: instant
+  - id: nvme_temp
+    query: nvme_temperature_celsius
+    query_type: instant
+
+  # GUESTS
+  - id: guest_info
+    query: pve_guest_info
+    query_type: instant
+    expose_labels: [id, name, type]
+  - id: guest_cpu
+    query: pve_cpu_usage_ratio
+    query_type: instant
+  - id: guest_mem_used
+    query: pve_memory_usage_bytes
+    query_type: instant
+  - id: guest_mem_total
+    query: pve_memory_size_bytes
+    query_type: instant
+  - id: guest_disk_read
+    query: pve_disk_read_bytes
+    query_type: instant
+  - id: guest_disk_write
+    query: pve_disk_write_bytes
+    query_type: instant
+  - id: guest_net_in
+    query: pve_net_in_bytes_total
+    query_type: instant
+  - id: guest_net_out
+    query: pve_net_out_bytes_total
+    query_type: instant
+
+derived:
+  # HOST
+  - id: host_mem_pct
+    expr: "100 * host_mem_used / host_mem_total"
+
+  # GUESTS (per-row)
+  - id: guest_cpu_pct
+    per_row: true
+    expr: "100 * guest_cpu"
+
+  - id: guest_mem_pct
+    per_row: true
+    expr: "100 * guest_mem_used / guest_mem_total"
+
+  # Decimal KB/MB conversions (1e3, 1e6)
+  - id: guest_disk_read_mb
+    per_row: true
+    expr: "guest_disk_read / 1_000_000"
+  - id: guest_disk_write_mb
+    per_row: true
+    expr: "guest_disk_write / 1_000_000"
+  - id: guest_net_in_mb
+    per_row: true
+    expr: "guest_net_in / 1_000_000"
+  - id: guest_net_out_mb
+    per_row: true
+    expr: "guest_net_out / 1_000_000"
+
+views:
+  - id: host_header
+    type: header
+    title: "Host Summary"
+    template: |
+      \x1b[1;32mCPU\x1b[0m: ${host_cpu|percent:1}  \
+      \x1b[1;34mMEM\x1b[0m: ${host_mem_pct|percent:1}  \
+      \x1b[1;33mVMs\x1b[0m:${vm_count}  \
+      \x1b[1;35mNVMe\x1b[0m:${nvme_temp|temp_c:0}  \
+      ${uptime}
+    computed_values:
+      vm_count: { from_metric: guest_info, op: count }
+      uptime:   { builtin: uptime }
+
+  - id: guest_table
+    type: table
+    title: "VMs and Containers"
+    source:
+      rows_from:
+        anchor_metric: guest_info
+        join_on_label: id
+      preferred_labels: { name: name, type: type }
+      sort: { by: guest_cpu_pct, order: desc }
+    columns:
+      - id: name
+        title: "VM/CT"
+        value: "${name}"
+        style:
+          color_by_label: { type: { lxc: "\x1b[1;36m", qemu: "\x1b[1;33m" } }
+          reset: "\x1b[0m"
+
+      - id: cpu
+        title: "CPU%"
+        value: "${guest_cpu_pct}"
+        format: percent
+        decimals: 1
+
+      - id: mem
+        title: "MEM%"
+        value: "${guest_mem_pct}"
+        format: percent
+        decimals: 1
+
+      - id: read
+        title: "DiskR"
+        value: "${guest_disk_read_mb}"
+        format: mb
+        decimals: 1
+
+      - id: write
+        title: "DiskW"
+        value: "${guest_disk_write_mb}"
+        format: mb
+        decimals: 1
+
+      - id: netin
+        title: "NetIn"
+        value: "${guest_net_in_mb}"
+        format: mb
+        decimals: 1
+
+      - id: netout
+        title: "NetOut"
+        value: "${guest_net_out_mb}"
+        format: mb
+        decimals: 1
+
+layout:
+  - view: host_header
+  - view: guest_table
+
