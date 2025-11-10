@@ -137,12 +137,6 @@ These control:
 
 ---
 
-## Understanding `config.yml`
-
-Let’s unpack it section by section.
-
----
-
 ### **`metrics:` — What to Query**
 
 Each metric has:
