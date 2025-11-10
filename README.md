@@ -39,29 +39,12 @@ It’s written entirely in **Python 3**, with **no external dependencies except 
 
 ### 1. Dependencies
 
-Install Python 3 and PyYAML:
+Install PyYAML:
 
 ```bash
-sudo apt install python3 python3-pip
 pip install pyyaml
 ```
 
-### 2. (Optional) Full Vim YAML highlighting
-
-If you want to edit `config.yml` with syntax colors:
-
-```bash
-sudo apt install vim-nox
-```
-
-Then in `~/.vimrc`:
-
-```vim
-syntax on
-filetype plugin indent on
-```
-
----
 
 ## Running
 
