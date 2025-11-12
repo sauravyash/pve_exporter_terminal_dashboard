@@ -5,11 +5,12 @@ A small engine that reads a YAML config describing Prometheus-backed host/guest 
 computes derived expressions (safe AST), and renders to a TTY using VT100 codes.
 Decimal KB/MB (1 KB = 1000 B, 1 MB = 1,000,000 B).
 """
-
+import re
 import os
 import time
 import json
 import math
+from pprint import pprint
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -59,9 +60,21 @@ def fmt_value(val: Optional[float], fmt: str, decimals: int = 1) -> str:
     try:
         if fmt == 'percent':
             return f"{val:.{decimals}f}%"
+        if fmt == '-b':
+            # auto format bytes
+            units = ["B", "KB", "MB", "GB", "TB", "PB"]
+            size = val
+            unit_index = 0
+            while size >= 1024 and unit_index < len(units) - 1:
+                size = int(size) >> 10  # divide by 1024
+                unit_index += 1
+            suffix = units[unit_index]
+            return f"{size:.{decimals}f} {suffix}"
         if fmt == 'kb':
+            val = val / 1000
             return f"{val:.{decimals}f} KB"
         if fmt == 'mb':
+            val = val / 1000000
             return f"{val:.{decimals}f} MB"
         if fmt == 'number':
             return f"{val:.{decimals}f}"
@@ -72,7 +85,8 @@ def fmt_value(val: Optional[float], fmt: str, decimals: int = 1) -> str:
             return (fmt % val)
         except Exception:
             return str(val)
-    except Exception:
+    except Exception as e:
+        print(e)
         return '---'
 
 # ------------------------------- Safe Eval -------------------------------
@@ -184,6 +198,61 @@ def prom_query(base_url: str, query: str, timeout: float = 3.0):
 def parse_results(result_json: dict) -> List[dict]:
     return (result_json or {}).get("data", {}).get("result", []) or []
 
+
+# ------------------------------ Extra features --------------------------- 
+
+def apply_color_macros(cfg):
+    colors = cfg.get("colors", {})
+    def resolve(path):
+        val = colors
+        for part in path.split("."):
+            if isinstance(val, dict):
+                val = val.get(part)
+            else:
+                return None
+        return val
+    def replace_colors(s):
+        def sub(match):
+            path = match.group(1)
+            return resolve(path) or match.group(0)
+        return re.sub(r"\$\{colors\.([a-zA-Z0-9_.-]+)\}", sub, s)
+    # recursively apply to all strings in the config
+    def recurse(node):
+        if isinstance(node, dict):
+            return {k: recurse(v) for k, v in node.items()}
+        elif isinstance(node, list):
+            return [recurse(v) for v in node]
+        elif isinstance(node, str):
+            return replace_colors(node)
+        else:
+            return node
+    return recurse(cfg)
+
+def clear_tty(tty_path="/dev/tty"):
+    with open(tty_path, "wb", buffering=0) as tty:
+        tty.write(b"\033c")  # full reset
+        tty.flush()
+
+ANSI_ESCAPE = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
+
+def visible_len(s: str) -> int:
+    """Return printable length of string (ignoring ANSI codes)."""
+    return len(ANSI_ESCAPE.sub('', s))
+
+def pad_ansi(s: str, width: int, align='<'):
+    """Pad colored strings properly, ignoring ANSI escape codes."""
+    real_length = visible_len(s)
+    pad_len = max(0, width - real_length)
+    if align == '<':
+        return s + ' ' * pad_len
+    elif align == '>':
+        return ' ' * pad_len + s
+    elif align == '^':
+        left = pad_len // 2
+        right = pad_len - left
+        return ' ' * left + s + ' ' * right
+    else:
+        raise ValueError("align must be '<', '>', or '^'")
 # ------------------------------ Engine Core ------------------------------
 
 class DashboardEngine:
@@ -273,6 +342,8 @@ class DashboardEngine:
         self.by_name_id.clear()
         self.by_name_only.clear()
         self.rows.clear()
+        
+        
 
         # Build indices and guest rows (join by label 'id' when possible)
         for s in self.series:
@@ -293,6 +364,7 @@ class DashboardEngine:
 
             # if this series exposes labels, keep them for row metadata
             expose = s.get("_expose_labels") or []
+
             if expose and row_id is not None:
                 labels = {k: metric.get(k, "") for k in expose}
                 r = self.rows.setdefault(row_id, {"labels": {}, "values": {}})
@@ -302,6 +374,7 @@ class DashboardEngine:
         for (name, rid), vals in self.by_name_id.items():
             r = self.rows.setdefault(rid, {"labels": {}, "values": {}})
             r["values"][name] = vals[0]  # take first value
+
 
     # ------------------ Contexts for eval ------------------
 
@@ -328,7 +401,7 @@ class DashboardEngine:
                     ctx[k] = v
             for k, v in r["values"].items():
                 ctx[k] = v
-            out[rid] = ctx
+            out[rid] = ctx 
         return out
 
     # ------------------ Derived evaluation ------------------
@@ -336,7 +409,7 @@ class DashboardEngine:
     def compute_derived(self, gctx: Dict[str, Any], rctxs: Dict[str, Dict[str, Any]]):
         derived_global: Dict[str, Any] = {}
         derived_rows: Dict[str, Dict[str, Any]] = {rid: {} for rid in rctxs}
-
+        
         # simple multi-pass to resolve references among deriveds
         for _ in range(3):
             for d in self.derived:
@@ -361,6 +434,7 @@ class DashboardEngine:
                     except Exception:
                         val = None
                     derived_global[d.id] = val
+        
         return derived_global, derived_rows
 
     # ------------------ Rendering ------------------
@@ -469,35 +543,48 @@ class DashboardEngine:
             rows_list.sort(key=lambda tup: (get_value(tup[0], tup[1], view.source.preferred_labels, sort_by) is None,
                                             get_value(tup[0], tup[1], view.source.preferred_labels, sort_by) or -math.inf),
                            reverse=sort_order_desc)
-
+        
+        
         # header
-        header_cells = [c.title for c in view.columns]
-        header = "  ".join(header_cells)
+        header_cells = []
+        for col in view.columns:
+            title = col.title or col.id
+            width = col.width
+            if width:
+                header_cells.append(pad_ansi(title, width))
+            else:
+                header_cells.append(title)
+        header = "\t".join(header_cells)
 
         lines = [header]
-
         # render rows
         for rid, base, labels in rows_list:
             cells = []
+            
             for col in view.columns:
                 raw = col.value
                 # support ${name} tokens in column values
                 if raw.startswith("${") and raw.endswith("}"):
                     key = raw[2:-1].strip()
                     # prefer derived row values, then row ctx, then label
+
                     if key in drows.get(rid, {}):
                         val = drows[rid][key]
                         cell = fmt_value(val, col.format, col.decimals)
                     elif key in base:
                         v = base[key]
-                        cell = fmt_value(v if isinstance(v, (int, float)) else None, col.format, col.decimals)
+                        if isinstance(v, (int, float)):
+                            cell = fmt_value(v, col.format, col.decimals) 
+                        else:
+                            cell = v
                     else:
                         v = labels.get(key, "")
+                         
                         # labels are strings; style may colorize them, leave raw
                         cell = str(v) if v else self.cfg.get("globals", {}).get("defaults", {}).get("missing_value", "---")
                 else:
                     cell = str(raw)
-
+                
                 # optional ANSI color by label mapping
                 style = col.style or {}
                 clr_by = (style.get("color_by_label") or {}).get("type")
@@ -510,10 +597,12 @@ class DashboardEngine:
 
                 # optional width padding
                 if col.width:
-                    cell = f"{cell:<{col.width}}"
+                    # cell = f"{cell.strip():<{col.width}}"
+                    cell = pad_ansi(cell.strip(), col.width)
+                    
                 cells.append(cell)
 
-            lines.append("  ".join(cells))
+            lines.append("\t".join(cells))
 
         return "\n".join(lines)
 
@@ -522,8 +611,11 @@ class DashboardEngine:
 def run_dashboard(cfg_path: str, tty_path: str):
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+        cfg = apply_color_macros(cfg)
 
     engine = DashboardEngine(cfg)
+    
+    clear_tty(tty_path)
 
     # Initial draw target
     tty = open_tty(tty_path)
