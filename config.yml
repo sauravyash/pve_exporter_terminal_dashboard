@@ -1,4 +1,9 @@
 version: 1
+terminal:
+  font:
+    prefix: Uni2
+    fontface: TerminusBold
+    fontsize: 24x12
 datasources:
   prometheus:
     base_url: http://192.168.1.24:9090
@@ -21,43 +26,107 @@ metrics:
   - id: host_cpu_decimal
     query: 'pve_cpu_usage_ratio{id="${node_id}"}'
     query_type: instant
+
   - id: host_mem_used
     query: 'pve_memory_usage_bytes{id="${node_id}"}'
     query_type: instant
+
   - id: host_mem_total
     query: 'pve_memory_size_bytes{id="${node_id}"}'
     query_type: instant
+
   - id: nvme_temp
     query: nvme_temperature_celsius
     query_type: instant
+
   - id: guest_info
-    query: pve_guest_info
+    query: |
+      (
+        (pve_lock_state == 1)
+        or
+        ((pve_ha_state == 1) unless on (id) (pve_lock_state == 1))
+        or
+        (
+          label_replace(pve_up == 1, "state", "running", "id", ".*")
+          or
+          label_replace(pve_up == 0, "state", "stopped", "id", ".*")
+        ) unless on (id) ((pve_lock_state == 1) or (pve_ha_state == 1))
+      )
+      * on (id) group_left(name,node,type)
+      pve_guest_info
+
     query_type: instant
     expose_labels:
       - id
       - name
       - type
+      - state
+
   - id: guest_cpu
     query: pve_cpu_usage_ratio
     query_type: instant
+
   - id: guest_mem_used
     query: pve_memory_usage_bytes
     query_type: instant
+
   - id: guest_mem_total
     query: pve_memory_size_bytes
     query_type: instant
+
   - id: guest_disk_read
     query: rate(pve_disk_read_bytes[5m])
     query_type: instant
+
   - id: guest_disk_write
     query: rate(pve_disk_write_bytes[5m])
     query_type: instant
+
   - id: guest_net_in
     query: rate(pve_network_receive_bytes[5m])
     query_type: instant
+
   - id: guest_net_out
     query: rate(pve_network_transmit_bytes[5m])
     query_type: instant
+
+  - id: mc_player_list
+    query: |
+      minecraft_player_online
+      or
+      # --- Synthetic "none" player when server is online but empty ---
+      (
+        (
+          (minecraft_query_up == 1 or minecraft_status_up == 1)
+        )
+        * on(instance, job) group_right()
+        (
+          label_replace(
+            minecraft_query_up,
+            "player", "[None]",
+            "instance", ".*"
+          )
+          unless on(instance, job) minecraft_player_online
+        )
+      )
+      or
+      # --- Synthetic "server_offline" player when both are 0 ---
+      (
+        (
+          (minecraft_query_up == 0)
+          and on(instance, job) (minecraft_status_up == 0)
+        )
+        * on(instance, job) group_right()
+        label_replace(
+          minecraft_query_up,
+          "player", "[Server Offline]",
+          "instance", ".*"
+        )
+      )
+
+    query_type: instant
+    expose_labels:
+      - player
 
 derived:
   - id: host_cpu
@@ -78,8 +147,8 @@ views:
   - id: host_header
     type: header
     title: Host Summary
-    template: '${colors.bright.green}CPU${colors.reset}: ${host_cpu|percent:1}  ${colors.bright.blue}MEM${colors.reset}:
-      ${host_mem_pct|percent:1}  ${colors.bright.yellow}VMs${colors.reset}:${vm_count}  ${colors.bright.magenta}NVMe${colors.reset}:${nvme_temp|temp_c:0}  ${uptime}'
+    template: '${uptime} \n${colors.bright.green}CPU${colors.reset}: ${host_cpu|percent:1}  ${colors.bright.blue}MEM${colors.reset}:
+      ${host_mem_pct|percent:1}  ${colors.bright.yellow}VMs${colors.reset}:${vm_count}  ${colors.bright.magenta}NVMe${colors.reset}:${nvme_temp|temp_c:0}'
     computed_values:
       vm_count:
         from_metric: guest_info
@@ -112,9 +181,9 @@ views:
         width: 12
 
       - id: status
-        title: Status
-        value: "Running"
-        width: 18
+        title: State
+        value: ${state}
+        width: 12
 
       - id: cpu
         title: CPU%
@@ -122,7 +191,7 @@ views:
         format: percent
         decimals: 1
         style: {}
-        width: 12
+        width: 8
 
       - id: mem
         title: MEM%
@@ -130,7 +199,7 @@ views:
         format: percent
         decimals: 1
         style: {}
-        width: 12
+        width: 8
 
       - id: read
         title: DiskR
@@ -138,7 +207,7 @@ views:
         format: -b
         decimals: 1
         style: {}
-        width: 12
+        width: 8
 
       - id: write
         title: DiskW
@@ -146,7 +215,7 @@ views:
         format: -b
         decimals: 1
         style: {}
-        width: 12
+        width: 8
 
       - id: netin
         title: NetIn
@@ -154,7 +223,7 @@ views:
         format: -b
         decimals: 1
         style: {}
-        width: 12
+        width: 8
 
       - id: netout
         title: NetOut
@@ -162,12 +231,23 @@ views:
         format: -b
         decimals: 1
         style: {}
-        width: 12
-
+        width: 8
+  
+  - id: mc_dash
+    title: MC Online Users
+    type: list
+    source:
+      items_from:
+        metric: mc_player_list
+        labels: [player]
+    item:
+      template: "${colors.bright.cyan}${player}${colors.reset}"
 
 layout:
-- view: host_header
-- view: guest_table
+  - view: host_header
+  - view: guest_table
+  - view: mc_dash
+
 colors:
   reset: "\e[0m"
   bright:

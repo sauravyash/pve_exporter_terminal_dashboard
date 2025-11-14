@@ -7,9 +7,14 @@ Usage:
 """
 
 import os
+import sys
 from dash_engine import run_dashboard
 
 if __name__ == "__main__":
-    cfg = os.environ.get("PVE_DASH_CFG", "config.yml")
+    cfg = os.environ.get("CONFIG", "config.yml")
     tty = os.environ.get("TTY_DEV", "/dev/tty")
-    run_dashboard(cfg, tty)
+    try:
+        run_dashboard(cfg, tty)
+    except (KeyboardInterrupt, EOFError):
+        print("\nExiting...")
+        sys.exit(0)

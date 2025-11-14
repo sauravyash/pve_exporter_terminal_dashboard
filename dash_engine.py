@@ -7,14 +7,17 @@ Decimal KB/MB (1 KB = 1000 B, 1 MB = 1,000,000 B).
 """
 import re
 import os
+import subprocess
 import time
 import json
 import math
 from pprint import pprint
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+import signal
 
 try:
     import yaml  # PyYAML
@@ -22,7 +25,7 @@ except Exception as e:
     raise SystemExit("This program requires PyYAML. Install with: pip install pyyaml") from e
 
 # ------------------------------- Utilities -------------------------------
-
+TTY_PATH = os.environ.get("TTY_DEV", "/dev/tty")
 ESC = "\x1b"
 
 def open_tty(path: str):
@@ -148,6 +151,13 @@ def eval_expr(expr: str, ctx: Dict[str, Any]) -> Optional[float]:
 # ------------------------------ Data Classes -----------------------------
 
 @dataclass
+class ListSourceDef:
+    items_from: dict = field(default_factory=dict)  # { metric: str, labels?: [..] }
+    sort: Dict[str, Any] = field(default_factory=dict)
+    filter: Dict[str, Any] = field(default_factory=dict)
+    limit: Optional[int] = None
+
+@dataclass
 class MetricDef:
     id: str
     query: str
@@ -186,6 +196,13 @@ class ViewDef:
     computed_values: Dict[str, Any] = field(default_factory=dict)
     source: Optional[TableSourceDef] = None
     columns: List[ColumnDef] = field(default_factory=list)
+    list_source: Optional[ListSourceDef] = None
+    item_template: Optional[str] = None
+    item_prefix: str = ""
+    item_suffix: str = ""
+    item_width: Optional[int] = None
+
+
 
 # ------------------------------ Prometheus -------------------------------
 
@@ -291,6 +308,25 @@ class DashboardEngine:
                     ),
                     columns=[ColumnDef(**c) for c in v.get("columns", [])],
                 )
+            elif v.get("type") == "list":
+                ls = v.get("source", {})
+                item = v.get("item", {})
+                view = ViewDef(
+                    id=v["id"],
+                    type="list",
+                    title=v.get("title"),
+                    list_source=ListSourceDef(
+                        items_from=ls.get("items_from", {}),
+                        sort=ls.get("sort", {}),
+                        filter=ls.get("filter", {}),
+                        limit=ls.get("limit"),
+                    ),
+                    item_template=item.get("template", "${user} ${tty} ${addr}"),
+                    item_prefix=item.get("prefix", ""),
+                    item_suffix=item.get("suffix", ""),
+                    item_width=item.get("width"),
+                )
+                self.views.append(view)
             else:
                 view = ViewDef(
                     id=v["id"],
@@ -375,7 +411,6 @@ class DashboardEngine:
             r = self.rows.setdefault(rid, {"labels": {}, "values": {}})
             r["values"][name] = vals[0]  # take first value
 
-
     # ------------------ Contexts for eval ------------------
 
     def global_ctx(self) -> Dict[str, Any]:
@@ -401,7 +436,7 @@ class DashboardEngine:
                     ctx[k] = v
             for k, v in r["values"].items():
                 ctx[k] = v
-            out[rid] = ctx 
+            out[rid] = ctx
         return out
 
     # ------------------ Derived evaluation ------------------
@@ -437,6 +472,43 @@ class DashboardEngine:
         
         return derived_global, derived_rows
 
+    def _row_matches_filters(self, labels: dict, flt: dict) -> bool:
+        """Return True if this row should be kept, False if filtered out."""
+        if not flt:
+            return True
+
+        include_rules = flt.get("include", [])
+        exclude_rules = flt.get("exclude", [])
+
+        def match(rule):
+            lab = rule.get("label")
+            if lab is None:
+                return True
+            val = labels.get(lab, "")
+            if "equals" in rule:
+                return val == rule["equals"]
+            if "in" in rule:
+                return val in rule["in"]
+            if "not_in" in rule:
+                return val not in rule["not_in"]
+            if "startswith" in rule:
+                return val.startswith(rule["startswith"])
+            if "endswith" in rule:
+                return val.endswith(rule["endswith"])
+            if "regex" in rule:
+                return re.search(rule["regex"], val) is not None
+            return True
+
+        # include rules: if any are given, row must match at least one
+        if include_rules and not any(match(r) for r in include_rules):
+            return False
+
+        # exclude rules: row must not match any
+        if any(match(r) for r in exclude_rules):
+            return False
+
+        return True
+
     # ------------------ Rendering ------------------
 
     def render_header(self, view: ViewDef, gctx: Dict[str, Any], dglob: Dict[str, Any]) -> str:
@@ -446,7 +518,7 @@ class DashboardEngine:
         for key, spec in (view.computed_values or {}).items():
             if isinstance(spec, dict) and spec.get("builtin") == "uptime":
                 computed[key] = get_uptime()
-            elif isinstance(spec, dict) and spec.get("from_metric"):
+            elif isinstance(spec, dict) and spec.get("from_metric"): 
                 src = spec["from_metric"]
                 op = spec.get("op", "count")
                 if op == "count":
@@ -510,14 +582,88 @@ class DashboardEngine:
         out.append(buf)
         return "".join(out)
 
+    def render_list(self, view: ViewDef) -> str:
+        def _subst_tokens(text: str, ctx: Dict[str, Any]) -> str:
+            s = text
+            i = 0; out = []
+            while i < len(s):
+                if s[i:i+2] == "${":
+                    j = s.find("}", i+2)
+                    if j == -1:
+                        out.append(s[i:]); break
+                    token = s[i+2:j].strip()
+                    val = ctx.get(token)
+                    out.append("" if val is None else str(val))
+                    i = j + 1
+                else:
+                    out.append(s[i]); i += 1
+            return "".join(out)
+
+
+        src = view.list_source
+        metric_id = src.items_from.get("metric")
+        if not metric_id:
+            return "(no items)"
+        # Gather all series from self.series that match this metric id
+        series = [s for s in self.series if s.get("_metric_id") == metric_id]
+
+        items = []
+        for s in series:
+            labels = dict(s.get("metric", {}))
+            # apply explicit label filtering if provided
+            lab_whitelist = src.items_from.get("labels")
+            if lab_whitelist:
+                labels = {k: labels.get(k) for k in lab_whitelist if k in labels}
+            # apply include/exclude filter
+            if not self._row_matches_filters(labels, src.filter):
+                continue
+            items.append(labels)
+
+        # sort
+        sort = src.sort or {}
+        by_label = sort.get("by_label")
+        if by_label:
+            items.sort(key=lambda L: (L.get(by_label) is None, str(L.get(by_label) or "")),
+                       reverse=(sort.get("order","asc")=="desc"))
+
+        # limit
+        if src.limit:
+            items = items[: int(src.limit)]
+
+        # render
+        lines = []
+        if view.title:
+            lines.append(view.title)
+        for L in items:
+            line = _subst_tokens(view.item_template, L)
+            
+            if view.item_width:
+                # optional total-line padding (ANSI-aware pad if you already added pad_ansi)
+                from re import compile
+                ANSI_RE = compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+                vis = len(ANSI_RE.sub("", line))
+                if vis < view.item_width:
+                    line = line + " " * (view.item_width - vis)
+            lines.append(f"{view.item_prefix}{line}{view.item_suffix}")
+        return "\n".join(lines) if lines else "(empty)"
+
+
     def render_table(self, view: ViewDef, gctx: Dict[str, Any], drows: Dict[str, Dict[str, Any]]) -> str:
         # determine row set
         anchor_id = view.source.rows_from.get("anchor_metric")
         join_label = view.source.rows_from.get("join_on_label", "id")
+
+        allowed_ids = set()
+        for rid, r in self.rows.items():
+            if anchor_id and anchor_id in r["values"]:
+                allowed_ids.add(rid)
+
         # Build rows list as (rid, ctx, labels)
         rows_list = []
         rctxs = self.rows_ctx()
         for rid, base in rctxs.items():
+            if anchor_id and rid not in allowed_ids:
+                continue
             # filter by presence of anchor metric labels (already ensured when rows built from exposed labels)
             rows_list.append((rid, base, self.rows[rid]["labels"]))
 
@@ -603,20 +749,50 @@ class DashboardEngine:
                 cells.append(cell)
 
             lines.append("\t".join(cells))
-
+        lines.append("\n")
         return "\n".join(lines)
+
+
+def handle_resize(signum, frame):
+    clear_tty(TTY_PATH)
+    print(f"[RESIZE DETECTED] {TTY_PATH}")
+
+signal.signal(signal.SIGWINCH, handle_resize)
 
 # ------------------------------- Runner ----------------------------------
 
 def run_dashboard(cfg_path: str, tty_path: str):
+    TTY_PATH = tty_path
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
         cfg = apply_color_macros(cfg)
+    
+    if cfg.get("version") != 1:
+        print("Incorrect Config Version")
+        exit(1)
 
     engine = DashboardEngine(cfg)
     
     clear_tty(tty_path)
 
+    # set font scaling
+    term_font = cfg.get("terminal", {}).get("font", None)
+    if term_font and tty_path.startswith("/dev/tty"):
+        font_list_path = term_font.get("path", "/usr/share/consolefonts")
+        prefix = term_font.get("prefix", "Lat15")
+        fontface = term_font.get("fontface", "TerminusBold")
+        fontsize = term_font.get("fontsize", "24x12")
+
+        font_path = Path(f"{font_list_path}/{prefix}-{fontface}{fontsize}.psf.gz")
+
+        if not font_path.exists():
+            raise FileNotFoundError(f"Font not found: {font_path}")
+
+        subprocess.run(
+            ["setfont", "-C", tty_path, str(font_path)],
+            check=True,
+        )
+        
     # Initial draw target
     tty = open_tty(tty_path)
 
@@ -638,6 +814,8 @@ def run_dashboard(cfg_path: str, tty_path: str):
                 view = next(v for v in engine.views if v.id == vid)
                 if view.type == "table":
                     body_parts.append(engine.render_table(view, gctx, drows))
+                elif view.type == "list":
+                    body_parts.append(engine.render_list(view))
             cached_body = "\n".join(body_parts)
             full_redraw = True
             last_bulk = now
