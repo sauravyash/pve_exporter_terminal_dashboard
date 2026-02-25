@@ -416,8 +416,6 @@ class DashboardEngine:
         self.by_name_id.clear()
         self.by_name_only.clear()
         self.rows.clear()
-        
-        
 
         # Build indices and guest rows (join by label 'id' when possible)
         for s in self.series:
@@ -795,6 +793,14 @@ def handle_resize(signum, frame):
     clear_tty(TTY_PATH)
     print(f"[RESIZE DETECTED] {TTY_PATH}")
 
+def hide_cursor(tty):
+    w(tty, f"{ESC}[?25l")
+    tty.flush()
+
+def show_cursor(tty):
+    w(tty, f"{ESC}[?25h")
+    tty.flush()
+
 signal.signal(signal.SIGWINCH, handle_resize)
 
 # ------------------------------- Runner ----------------------------------
@@ -834,6 +840,11 @@ def run_dashboard(cfg_path: str, tty_path: str):
         
     # Initial draw target
     tty = open_tty(tty_path)
+
+    hide_cursor(tty)
+    signal.signal(signal.SIGINT, show_cursor)
+    signal.signal(signal.SIGTERM, show_cursor)
+    signal.signal(signal.SIGQUIT, show_cursor)
 
     last_bulk = 0.0
     full_redraw = True
