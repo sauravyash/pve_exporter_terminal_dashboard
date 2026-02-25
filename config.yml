@@ -148,7 +148,7 @@ views:
     type: header
     title: Host Summary
     template: '${uptime} \n${colors.bright.green}CPU${colors.reset}: ${host_cpu|percent:1}  ${colors.bright.blue}MEM${colors.reset}:
-      ${host_mem_pct|percent:1}  ${colors.bright.yellow}VMs${colors.reset}:${vm_count}  ${colors.bright.magenta}NVMe${colors.reset}:${nvme_temp|temp_c:0}'
+      ${host_mem_pct|percent:1}  ${colors.bright.yellow}Guests${colors.reset}:${vm_count}  ${colors.bright.magenta}NVMe${colors.reset}:${nvme_temp|temp_c:0}'
     computed_values:
       vm_count:
         from_metric: guest_info

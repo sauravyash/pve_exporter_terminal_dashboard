@@ -55,7 +55,8 @@ def draw_host_only(tty, host_line: str):
     w(tty, f"{ESC}7{ESC}[H{host_line}{ESC}[K{ESC}8")
 
 def draw_full_screen(tty, host_line: str, body: str):
-    w(tty, f"{ESC}[H{host_line}\n{body}\n{ESC}[J")
+    w(tty, f"{ESC}[H{host_line}\n{body}{ESC}[J")
+    tty.flush()
 
 def fmt_value(val: Optional[float], fmt: str, decimals: int = 1) -> str:
     if val is None:
@@ -207,10 +208,15 @@ class ViewDef:
 # ------------------------------ Prometheus -------------------------------
 
 def prom_query(base_url: str, query: str, timeout: float = 3.0):
-    url = f"{base_url}/api/v1/query?{urllib.parse.urlencode({'query': query})}"
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        url = f"{base_url}/api/v1/query?{urllib.parse.urlencode({'query': query})}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        pprint(url)
+        pprint(urllib.parse.urlencode({'query': query}))
+        raise e
 
 def parse_results(result_json: dict) -> List[dict]:
     return (result_json or {}).get("data", {}).get("result", []) or []
