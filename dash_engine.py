@@ -354,22 +354,54 @@ class DashboardEngine:
             out = out.replace("${" + k + "}", str(v))
         return out
 
-    def bulk_fetch(self):
-        # For simplicity, fetch metrics individually (still fast enough);
-        # can be optimized by merging queries if desired.
-        all_results = []
+    # Max length for the query URL param to avoid server/reverse-proxy limits
+    _BULK_QUERY_MAX_LEN = 7000
+
+    def _build_bulk_queries(self) -> List[str]:
+        """Build one or more PromQL expressions: each metric wrapped in label_replace(..., '_m', metric_id, ...) and OR'd."""
+        parts = []
         for m in self.metrics:
             q = self._subst_vars(m.query)
+            # Escape metric id for use inside double-quoted PromQL string
+            m_id_escaped = m.id.replace("\\", "\\\\").replace('"', '\\"')
+            wrapped = f'label_replace({q}, "_m", "{m_id_escaped}", "__name__", ".*")'
+            parts.append(wrapped)
+        combined = " or ".join(parts)
+        if len(combined) <= self._BULK_QUERY_MAX_LEN:
+            return [combined]
+        # Split into batches so each batch's query is under the limit
+        batch_queries = []
+        batch_parts = []
+        batch_len = 0
+        or_len = len(" or ")
+        for p in parts:
+            need = len(p) if not batch_parts else or_len + len(p)
+            if batch_parts and batch_len + need > self._BULK_QUERY_MAX_LEN:
+                batch_queries.append(" or ".join(batch_parts))
+                batch_parts = []
+                batch_len = 0
+            batch_parts.append(p)
+            batch_len += need
+        if batch_parts:
+            batch_queries.append(" or ".join(batch_parts))
+        return batch_queries
+
+    def bulk_fetch(self):
+        # Single or batched OR-query so we do 1–2 requests per cycle instead of one per metric.
+        by_id = {m.id: m for m in self.metrics}
+        all_results = []
+        for combined_query in self._build_bulk_queries():
             try:
-                res = prom_query(self.base_url, q, self.timeout_s)
+                res = prom_query(self.base_url, combined_query, self.timeout_s)
                 result_series = parse_results(res)
-                # annotate series with logical metric id for lookup
                 for s in result_series:
-                    s["_metric_id"] = m.id
-                    s["_expose_labels"] = m.expose_labels
-                all_results.extend(result_series)
+                    metric_labels = s.get("metric", {})
+                    metric_id = metric_labels.pop("_m", None)
+                    s["_metric_id"] = metric_id
+                    m_def = by_id.get(metric_id)
+                    s["_expose_labels"] = m_def.expose_labels if m_def else []
+                    all_results.append(s)
             except Exception:
-                # tolerate transient failures
                 continue
         self.series = all_results
         self._reindex()
@@ -775,8 +807,9 @@ def run_dashboard(cfg_path: str, tty_path: str):
     
     clear_tty(tty_path)
 
-    # set font scaling
-    term_font = cfg.get("terminal", {}).get("font", None)
+    # set font scaling (only if terminal/font section is present and valid)
+    term_cfg = cfg.get("terminal")
+    term_font = term_cfg.get("font") if isinstance(term_cfg, dict) else None
     if term_font and tty_path.startswith("/dev/tty"):
         font_list_path = term_font.get("path", "/usr/share/consolefonts")
         prefix = term_font.get("prefix", "Lat15")

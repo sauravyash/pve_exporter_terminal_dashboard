@@ -1,9 +1,9 @@
 version: 1
 terminal:
-  font:
-    prefix: Uni2
-    fontface: TerminusBold
-    fontsize: 24x12
+  # font:
+  #   prefix: Uni2
+  #   fontface: TerminusBold
+  #   fontsize: 24x12
 datasources:
   prometheus:
     base_url: http://192.168.1.10:9090

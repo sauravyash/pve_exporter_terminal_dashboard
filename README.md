@@ -77,6 +77,17 @@ source .venv/bin/activate
 pip install pyyaml
 ```
 
+### Testing
+
+Tests use **pytest**. Install dev dependencies and run tests from the project root:
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
+Optional: run with coverage (`pytest --cov=dash_engine`).
+
 ---
 
 ## Quickstart (YAML engine)
